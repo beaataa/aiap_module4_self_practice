@@ -1,0 +1,124 @@
+# paths are relative to the project root, not to src/
+data:
+  raw: data/classification_bonus_practice_data.csv
+  cleaned: data/cleaned.csv
+
+target: Survive
+id_column: ID
+
+cleaning:
+  # ID is not unique (885 codes are reused by unrelated patients) and one value
+  # came out of a spreadsheet as 8.46E+65. Favorite color is noise: it is
+  # redrawn at random on every row of the same patient. see eda.ipynb
+  drop_upfront: [ID, Favorite color]
+
+  # Survive is 0/1 on most rows and No/Yes on 867 of them
+  target_map: {"No": 0, "Yes": 1, "0": 0, "1": 1}
+
+  # 430 ages are negative. the absolute values sit on the same distribution as
+  # the positive ones (mean 60.0 against 60.9, same 40-95 range), so they are
+  # sign errors rather than a different kind of patient
+  age_absolute: true
+  valid_age_range: [40, 95]
+
+  # Smoke is Yes/No on most rows and YES/NO on 583 of them
+  smoke_case_fix: true
+
+  # Ejection Fraction is spelled out on most rows and abbreviated on 548 of
+  # them. L survives at 0.346 against Low at 0.339, N at 0.152 against Normal
+  # at 0.194, so the short forms are the same categories
+  ejection_fraction_map: {"L": "Low", "N": "Normal"}
+
+  # Diabetes and Pre-diabetes are one condition written two ways. a patient
+  # recorded as diabetic has their rows split at random between the two labels,
+  # and the two score identically (0.322 and 0.323 at patient level)
+  diabetes_map: {"Pre-diabetes": "Diabetes"}
+
+features:
+  # Weight / (Height/100)^2. constant within a patient (sd 0.14 against 7.73
+  # overall) while Height is redrawn uniformly, so BMI is the real attribute
+  # and Height and Weight are it split across two columns
+  bmi_from: [Height, Weight]
+
+  # Hemoglobin is drawn from one of two disjoint bands per patient, 9.0-11.9 or
+  # 12.0-17.5, with nothing in between. that is a binary anaemia flag stored as
+  # a continuous number
+  anaemia_from: Hemoglobin
+  anaemia_below: 12.0
+
+  # same shape: Blood Pressure is 40-119 or 121-179 per patient
+  high_bp_from: Blood Pressure
+  high_bp_at_least: 120
+
+  # replaced by the three features above
+  drop_after: [Height, Weight, Hemoglobin, Blood Pressure]
+
+# the 15000 rows are 297 patients recorded 32 to 109 times each. these four
+# columns are constant within a patient, so pasted together they recover which
+# patient a row belongs to. Creatinine is constant within a patient too but is
+# left out of the key, because its 499 gaps would split a patient in two.
+# used to keep a patient on one side of the split
+patient_key:
+  from: [Age, Sodium, Platelets, Creatine phosphokinase]
+  column: patient_key
+
+# columns the model never sees. patient_key is the row's patient fingerprint,
+# handing it to the model would be handing it the answer
+drop_for_modelling: [patient_key]
+
+split:
+  # one fifth of the patients, not one fifth of the rows
+  n_splits: 5
+  random_state: 42
+  group_column: patient_key
+
+preprocessing:
+  # Creatinine is the only column with gaps. median because the distribution
+  # runs from 0.5 to 9.4 with a long right tail
+  numeric_impute_strategy: median
+  # deliberately off. all 499 missing values sit in patients who did not
+  # survive, so a "was this missing" column is a copy of the target. see the
+  # Assumptions section of the README
+  add_missing_indicator: false
+
+evaluation:
+  cv_folds: 5
+  random_state: 42
+  results_dir: results
+  # the fitted pipeline plus the schema predict.py needs to use it
+  model_dir: models
+  # threshold-free, so tuning does not quietly optimise one operating point
+  tuning_metric: roc_auc
+  # the model comparison is sorted on cross validation, not on test. one test
+  # split is 59 patients, and 59 patients move an AUC by more than the gap
+  # between the models here. the test set is reported, it just does not choose.
+  # and not on a single cross validation either: the ranking metric is the mean
+  # over stability_seeds redraws of the folds
+  ranking_metric: repeated_cv_roc_auc
+  # how many times the grouped cross validation is redrawn
+  stability_seeds: 10
+  # for the precision/recall table of the chosen model
+  thresholds: [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+
+# every grid below has exactly 12 combinations, so no model wins by having
+# been searched harder than another
+tuning:
+  enabled: true
+  grids:
+    Logistic Regression:
+      model__C: [0.001, 0.01, 0.1, 1, 10, 100]
+      model__class_weight: [null, "balanced"]
+    # min_samples_leaf starts at 20, not 1. with 297 real patients behind
+    # 15000 rows, a leaf holding 20 rows can still be a single patient
+    Decision Tree:
+      model__max_depth: [null, 5, 10, 20]
+      model__min_samples_leaf: [20, 50, 100]
+    Random Forest:
+      model__n_estimators: [300]
+      model__max_depth: [null, 10, 20]
+      model__min_samples_leaf: [1, 20]
+      model__max_features: [1.0, "sqrt"]
+    Gradient Boosting:
+      model__learning_rate: [0.05, 0.1, 0.2]
+      model__max_depth: [null, 6]
+      model__max_iter: [100, 300]
